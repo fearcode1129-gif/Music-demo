@@ -1,135 +1,267 @@
-import fallbackSongs from '../data/songs';
+import { parseLrc } from '../utils/parseLrc';
+import { formatDurationLabel } from '../utils/player';
 
-const ITUNES_BASE_URL = 'https://itunes.apple.com/search';
+const MUSIC_API_PREFIX = '/api/music';
+const DEFAULT_GENRE = 'Pop';
+const SEED_SEARCH_LIMIT = 6;
+const SEED_RESULT_LIMIT = 24;
+const DEFAULT_COVER =
+  'data:image/svg+xml;utf8,' +
+  encodeURIComponent(`
+    <svg xmlns="http://www.w3.org/2000/svg" width="600" height="600" viewBox="0 0 600 600">
+      <defs>
+        <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#18243d" />
+          <stop offset="100%" stop-color="#f27a2c" />
+        </linearGradient>
+      </defs>
+      <rect width="600" height="600" fill="url(#g)" />
+      <circle cx="300" cy="300" r="150" fill="rgba(255,255,255,0.18)" />
+      <circle cx="300" cy="300" r="38" fill="rgba(255,255,255,0.72)" />
+      <text x="50%" y="83%" dominant-baseline="middle" text-anchor="middle"
+        fill="white" font-family="Arial, sans-serif" font-size="40" font-weight="700">
+        Music Player Demo
+      </text>
+    </svg>
+  `);
 
 const seedTerms = [
+  '周杰伦',
+  '林俊杰',
+  '陈奕迅',
+  '邓紫棋',
+  '五月天',
   'Taylor Swift',
   'Coldplay',
   'Adele',
-  'Bruno Mars',
-  'OneRepublic',
-  'Imagine Dragons',
-  'Maroon 5',
-  'Sia',
-  'Avicii',
-  'Ed Sheeran'
+  'Ed Sheeran',
+  'Bruno Mars'
 ];
 
-const toSongModel = (item) => ({
-  id: String(item.trackId),
-  title: item.trackName || 'Unknown Track',
-  artist: item.artistName || 'Unknown Artist',
-  album: item.collectionName || 'Unknown Album',
-  genre: item.primaryGenreName || 'Pop',
-  description: `${item.artistName || 'Unknown Artist'} track from ${item.collectionName || 'Unknown Album'}.`,
-  duration: item.trackTimeMillis
-    ? `${String(Math.floor(item.trackTimeMillis / 60000)).padStart(2, '0')}:${String(
-        Math.floor((item.trackTimeMillis % 60000) / 1000)
-      ).padStart(2, '0')}`
-    : '00:30',
-  year: item.releaseDate ? new Date(item.releaseDate).getFullYear() : 2024,
-  cover: (item.artworkUrl100 || '').replace('100x100', '600x600'),
-  audioUrl: item.previewUrl || ''
-});
-
-const scoreSong = (song, keyword) => {
-  const normalizedKeyword = keyword.trim().toLowerCase();
-  const title = (song.title || '').toLowerCase();
-  const artist = (song.artist || '').toLowerCase();
-  const album = (song.album || '').toLowerCase();
-  const genre = (song.genre || '').toLowerCase();
-  const searchable = `${title} ${artist} ${album} ${genre}`;
-
-  if (!normalizedKeyword) {
-    return 0;
-  }
-
-  if (title === normalizedKeyword) {
-    return 120;
-  }
-
-  if (artist === normalizedKeyword) {
-    return 110;
-  }
-
-  if (album === normalizedKeyword) {
-    return 100;
-  }
-
-  if (title.startsWith(normalizedKeyword)) {
-    return 90;
-  }
-
-  if (artist.startsWith(normalizedKeyword)) {
-    return 85;
-  }
-
-  if (album.startsWith(normalizedKeyword)) {
-    return 80;
-  }
-
-  if (searchable.includes(normalizedKeyword)) {
-    return 60;
-  }
-
-  return 0;
-};
-
-const rankSongs = (songs, keyword) =>
-  [...songs].sort((left, right) => scoreSong(right, keyword) - scoreSong(left, keyword));
-
-const fetchSongsByTerm = async (term, limit = 12) => {
-  const url = `${ITUNES_BASE_URL}?term=${encodeURIComponent(term)}&media=music&entity=song&limit=${limit}`;
-  const response = await fetch(url);
+const requestJson = async (path) => {
+  const response = await fetch(`${MUSIC_API_PREFIX}${path}`);
 
   if (!response.ok) {
     throw new Error('Music API request failed.');
   }
 
-  const data = await response.json();
-  const results = Array.isArray(data.results) ? data.results : [];
-
-  return results
-    .filter((item) => item.trackId && item.previewUrl && item.artworkUrl100)
-    .map(toSongModel);
+  return response.json();
 };
 
-export const fetchSeedSongs = async () => {
-  const resultGroups = await Promise.all(seedTerms.map((term) => fetchSongsByTerm(term, 8)));
-  const uniqueMap = new Map();
+const extractArtistNames = (artists = []) =>
+  (Array.isArray(artists) ? artists : [])
+    .map((artist) => artist?.name)
+    .filter(Boolean)
+    .join(' / ');
 
-  resultGroups.flat().forEach((song) => {
-    if (!uniqueMap.has(song.id)) {
-      uniqueMap.set(song.id, song);
+const mapPlayback = (item = {}) => ({
+  playable: item.playFlag !== false && item.visible !== false,
+  trial: Boolean(item.freeTrailFlag && item.freeTrail?.end),
+  trialInfo: item.freeTrail || null,
+  trialDuration: Number(item.freeTrail?.end) || null,
+  vip: Boolean(item.vipFlag || item.vipPlayFlag || item.payPlayFlag),
+  visible: item.visible !== false,
+  level: item.plLevel || item.level || null,
+  qualities: Array.isArray(item.qualities) ? item.qualities : [],
+  songFee: item.songFee ?? null
+});
+
+const mapSearchSong = (song = {}) => {
+  const artists = Array.isArray(song.fullArtists) && song.fullArtists.length > 0 ? song.fullArtists : song.artists;
+  const artistName = extractArtistNames(artists) || 'Unknown Artist';
+  const albumName = song.album?.name || 'Unknown Album';
+
+  return {
+    id: String(song.id),
+    title: song.name || 'Unknown Song',
+    artist: artistName,
+    album: albumName,
+    genre: Array.isArray(song.songTag) && song.songTag.length > 0 ? song.songTag[0] : DEFAULT_GENRE,
+    description: `${artistName} - ${albumName}`,
+    duration: formatDurationLabel(song.duration),
+    durationMs: Number(song.duration) || 0,
+    year: null,
+    cover: song.coverImgUrl || DEFAULT_COVER,
+    audioUrl: '',
+    source: 'netease-unofficial-api',
+    playback: mapPlayback(song)
+  };
+};
+
+const mapArtist = (artist = {}) => ({
+  id: String(artist.id),
+  artist: artist.name || 'Unknown Artist',
+  cover: artist.coverImgUrl || DEFAULT_COVER,
+  genre: artist.nationality || 'Artist',
+  songs: [],
+  musicSize: Number(artist.musicSize) || 0,
+  briefDesc: artist.briefDesc || ''
+});
+
+const mapAlbum = (album = {}) => ({
+  id: String(album.id),
+  album: album.name || 'Unknown Album',
+  artist: extractArtistNames(album.artists) || 'Unknown Artist',
+  cover: album.coverImgUrl || DEFAULT_COVER,
+  year: album.publishTime ? new Date(album.publishTime).getFullYear() : null,
+  songs: [],
+  genre: album.genre || DEFAULT_GENRE,
+  description: album.briefDesc || album.description || ''
+});
+
+const mapDetailSong = (song = {}) => ({
+  ...song,
+  duration: song.durationLabel || song.duration || '00:00',
+  cover: song.cover || DEFAULT_COVER
+});
+
+const mergeById = (items = []) => {
+  const map = new Map();
+
+  items.forEach((item) => {
+    if (item?.id) {
+      map.set(item.id, item);
     }
   });
 
-  const mergedSongs = Array.from(uniqueMap.values()).slice(0, 40);
-
-  if (mergedSongs.length >= 30) {
-    return mergedSongs;
-  }
-
-  return [...mergedSongs, ...fallbackSongs.filter((song) => !uniqueMap.has(song.id))];
+  return Array.from(map.values());
 };
 
-export const searchSongs = async (keyword, localSongs = fallbackSongs) => {
+export const fetchSongLyrics = async (songId) => {
+  if (!songId) {
+    return [];
+  }
+
+  const payload = await requestJson(`/song/${songId}/lyric`);
+  return parseLrc(payload.data?.lyric || '');
+};
+
+export const fetchSongDetail = async (songId) => {
+  if (!songId) {
+    return null;
+  }
+
+  const payload = await requestJson(`/song/${songId}/detail`);
+  return payload.data ? mapDetailSong(payload.data) : null;
+};
+
+export const resolvePlayableSong = async (song) => {
+  if (!song?.id) {
+    return null;
+  }
+
+  if (song.audioUrl) {
+    return song;
+  }
+
+  return fetchSongDetail(song.id);
+};
+
+export const fetchSeedSongs = async () => {
+  const groups = await Promise.all(
+    seedTerms.map((keyword) =>
+      searchSongs(keyword, {
+        limit: SEED_SEARCH_LIMIT,
+        offset: 0
+      })
+    )
+  );
+
+  const mergedSongs = mergeById(groups.flatMap((group) => group.songs)).slice(0, SEED_RESULT_LIMIT);
+  const hydratedSongs = await Promise.all(
+    mergedSongs.map(async (song) => {
+      const detailedSong = await fetchSongDetail(song.id).catch(() => null);
+      return detailedSong?.audioUrl ? detailedSong : null;
+    })
+  );
+
+  return hydratedSongs.filter(Boolean);
+};
+
+export const searchSongs = async (keyword, options = {}) => {
   const normalizedKeyword = keyword.trim();
-  const safeLocalSongs = Array.isArray(localSongs) && localSongs.length > 0 ? localSongs : fallbackSongs;
+  const { limit = 30, offset = 0 } = options;
 
   if (!normalizedKeyword) {
-    return safeLocalSongs;
+    return { songs: [], total: 0 };
   }
 
-  try {
-    return rankSongs(await fetchSongsByTerm(normalizedKeyword, 30), normalizedKeyword);
-  } catch (error) {
-    const loweredKeyword = normalizedKeyword.toLowerCase();
-    return rankSongs(
-      safeLocalSongs.filter((song) =>
-        [song.title, song.artist, song.album, song.genre].join(' ').toLowerCase().includes(loweredKeyword)
-      ),
-      normalizedKeyword
-    );
+  const payload = await requestJson(
+    `/search/songs?keyword=${encodeURIComponent(normalizedKeyword)}&limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`
+  );
+  const data = payload.data || {};
+  const songs = (Array.isArray(data.records) ? data.records : []).map(mapSearchSong);
+
+  return {
+    songs,
+    total: Number(data.recordCount) || songs.length,
+    raw: data
+  };
+};
+
+export const searchArtists = async (keyword, options = {}) => {
+  const normalizedKeyword = keyword.trim();
+  const { limit = 30, offset = 0 } = options;
+
+  if (!normalizedKeyword) {
+    return { artists: [], total: 0 };
   }
+
+  const payload = await requestJson(
+    `/search/artists?keyword=${encodeURIComponent(normalizedKeyword)}&limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`
+  );
+  const data = payload.data || {};
+  const artists = (Array.isArray(data.records) ? data.records : []).map(mapArtist);
+
+  return {
+    artists,
+    total: Number(data.recordCount) || artists.length,
+    raw: data
+  };
+};
+
+export const searchAlbums = async (keyword, options = {}) => {
+  const normalizedKeyword = keyword.trim();
+  const { limit = 30, offset = 0 } = options;
+
+  if (!normalizedKeyword) {
+    return { albums: [], total: 0 };
+  }
+
+  const payload = await requestJson(
+    `/search/albums?keyword=${encodeURIComponent(normalizedKeyword)}&limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`
+  );
+  const data = payload.data || {};
+  const albums = (Array.isArray(data.records) ? data.records : []).map(mapAlbum);
+
+  return {
+    albums,
+    total: Number(data.recordCount) || albums.length,
+    raw: data
+  };
+};
+
+export const searchComplexResults = async (keyword, options = {}) => {
+  const normalizedKeyword = keyword.trim();
+  const { limit = 30, offset = 0 } = options;
+
+  if (!normalizedKeyword) {
+    return {
+      songs: [],
+      artists: [],
+      albums: []
+    };
+  }
+
+  const payload = await requestJson(
+    `/search?keyword=${encodeURIComponent(normalizedKeyword)}&limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`
+  );
+  const data = payload.data || {};
+
+  return {
+    songs: (Array.isArray(data.songs) ? data.songs : []).map(mapSearchSong),
+    artists: (Array.isArray(data.artists) ? data.artists : []).map(mapArtist),
+    albums: (Array.isArray(data.albums) ? data.albums : []).map(mapAlbum),
+    raw: data
+  };
 };

@@ -1,6 +1,5 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import fallbackSongs from '../data/songs';
 import { fetchSeedSongs } from '../services/musicApi';
 
 const RECENT_HISTORY_LIMIT = 12;
@@ -15,9 +14,17 @@ const mergeSongsById = (...collections) => {
     }
 
     collection.forEach((song) => {
-      if (song?.id && song?.audioUrl && !mergedMap.has(song.id)) {
-        mergedMap.set(song.id, song);
+      if (!song?.id) {
+        return;
       }
+
+      const previousSong = mergedMap.get(song.id) || {};
+      mergedMap.set(song.id, {
+        ...previousSong,
+        ...song,
+        cover: song.cover || previousSong.cover,
+        audioUrl: song.audioUrl || previousSong.audioUrl || ''
+      });
     });
   });
 
@@ -27,33 +34,39 @@ const mergeSongsById = (...collections) => {
 export const useLibraryStore = create(
   persist(
     (set, get) => ({
-      songCatalog: fallbackSongs,
+      songCatalog: [],
+      lyricsBySongId: {},
       catalogLoading: true,
       catalogError: '',
       favoritesByUser: {},
       recentHistoryByUser: {},
       async loadCatalog(isAuthenticated) {
         if (!isAuthenticated) {
-          set({ catalogLoading: false, catalogError: '' });
+          set({ catalogLoading: false, catalogError: '', songCatalog: [], lyricsBySongId: {} });
           return;
         }
 
-        set({ catalogLoading: true, catalogError: '' });
+        const cachedSongs = get().songCatalog;
+        const hasCachedSongs = Array.isArray(cachedSongs) && cachedSongs.length > 0;
+
+        set({
+          catalogLoading: !hasCachedSongs,
+          catalogError: '',
+          songCatalog: hasCachedSongs ? cachedSongs : []
+        });
 
         try {
-          const persistedSongs = Array.isArray(get().songCatalog) ? get().songCatalog : [];
           const fetchedSongs = await fetchSeedSongs();
-          const nextSongs = Array.isArray(fetchedSongs) && fetchedSongs.length > 0 ? fetchedSongs : fallbackSongs;
 
           set({
-            songCatalog: mergeSongsById(nextSongs, persistedSongs),
+            songCatalog: fetchedSongs,
             catalogError: ''
           });
         } catch (error) {
-          set((state) => ({
-            songCatalog: mergeSongsById(state.songCatalog, fallbackSongs),
-            catalogError: '音乐接口加载失败，已切换到本地歌曲。'
-          }));
+          set({
+            songCatalog: hasCachedSongs ? get().songCatalog : [],
+            catalogError: '网易云音乐数据加载失败，请确认本地 Music API 服务已启动。'
+          });
         } finally {
           set({ catalogLoading: false });
         }
@@ -66,6 +79,25 @@ export const useLibraryStore = create(
         const mergedSongs = mergeSongsById(get().songCatalog, incomingSongs);
         set({ songCatalog: mergedSongs });
         return mergedSongs;
+      },
+      cacheLyrics(songId, lyrics) {
+        if (!songId) {
+          return;
+        }
+
+        set((state) => ({
+          lyricsBySongId: {
+            ...state.lyricsBySongId,
+            [songId]: Array.isArray(lyrics) ? lyrics : []
+          }
+        }));
+      },
+      getLyricsBySongId(songId) {
+        if (!songId) {
+          return [];
+        }
+
+        return get().lyricsBySongId[songId] || [];
       },
       getFavoriteSongIds(userId) {
         if (!userId) {
@@ -125,10 +157,11 @@ export const useLibraryStore = create(
       }
     }),
     {
-      name: 'music-demo-library-store',
+      name: 'music-demo-library-store-v4',
       storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({
         songCatalog: state.songCatalog,
+        lyricsBySongId: state.lyricsBySongId,
         favoritesByUser: state.favoritesByUser,
         recentHistoryByUser: state.recentHistoryByUser
       })
@@ -141,3 +174,6 @@ export const selectFavoriteSongIdsByUser = (userId) => (state) =>
 
 export const selectRecentHistoryByUser = (userId) => (state) =>
   userId ? state.recentHistoryByUser[userId] || EMPTY_ARRAY : EMPTY_ARRAY;
+
+export const selectLyricsBySongId = (songId) => (state) =>
+  songId ? state.lyricsBySongId[songId] || EMPTY_ARRAY : EMPTY_ARRAY;

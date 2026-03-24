@@ -2,6 +2,7 @@ import React from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import LikesPage from '../pages/LikesPage';
 import LoginPage from '../pages/LoginPage';
+import NowPlayingPage from '../pages/NowPlayingPage';
 import RegisterPage from '../pages/RegisterPage';
 import SongDetailPage from '../pages/SongDetailPage';
 import SongListPage from '../pages/SongListPage';
@@ -26,6 +27,14 @@ const AppRouter = () => {
         element={
           <ProtectedRoute>
             <LikesPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/player"
+        element={
+          <ProtectedRoute>
+            <NowPlayingPage />
           </ProtectedRoute>
         }
       />

@@ -1,46 +1,100 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import LyricsPanel from '../components/LyricsPanel';
+import { fetchSongDetail, fetchSongLyrics } from '../services/musicApi';
 import { useAuthStore } from '../store/authStore';
-import { useCommentStore } from '../store/commentStore';
-import { selectFavoriteSongIdsByUser, useLibraryStore } from '../store/libraryStore';
+import { selectCommentsBySong, useCommentStore } from '../store/commentStore';
+import { selectFavoriteSongIdsByUser, selectLyricsBySongId, useLibraryStore } from '../store/libraryStore';
 import { usePlayerStore } from '../store/playerStore';
 
 const SongDetailPage = () => {
   const { id } = useParams();
   const currentUser = useAuthStore((state) => state.currentUser);
   const songs = useLibraryStore((state) => state.songCatalog);
+  const registerSongsInCatalog = useLibraryStore((state) => state.registerSongsInCatalog);
+  const cacheLyrics = useLibraryStore((state) => state.cacheLyrics);
   const favoriteSongIds = useLibraryStore(selectFavoriteSongIdsByUser(currentUser?.id));
+  const cachedLyrics = useLibraryStore(selectLyricsBySongId(id));
   const toggleFavorite = useLibraryStore((state) => state.toggleFavorite);
   const ensureSongComments = useCommentStore((state) => state.ensureSongComments);
   const addComment = useCommentStore((state) => state.addComment);
   const deleteComment = useCommentStore((state) => state.deleteComment);
-  const comments = useCommentStore((state) => state.commentsBySong[id] || []);
+  const comments = useCommentStore(selectCommentsBySong(id));
   const playSong = usePlayerStore((state) => state.playSong);
+  const currentSongId = usePlayerStore((state) => state.currentSongId);
+  const currentTime = usePlayerStore((state) => state.currentTime);
+
   const [newComment, setNewComment] = useState('');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [lyricsLoading, setLyricsLoading] = useState(true);
+  const [lyricsError, setLyricsError] = useState('');
+  const [songLoading, setSongLoading] = useState(true);
+  const [detailSong, setDetailSong] = useState(null);
 
-  const song = useMemo(
+  const catalogSong = useMemo(
     () => (Array.isArray(songs) ? songs.find((item) => item.id === id) : null),
     [id, songs]
   );
+
+  const song = detailSong || catalogSong;
+
+  useEffect(() => {
+    let active = true;
+    setSongLoading(true);
+    setDetailSong(null);
+
+    if (!id) {
+      setSongLoading(false);
+      return;
+    }
+
+    if (catalogSong) {
+      setSongLoading(false);
+      return;
+    }
+
+    fetchSongDetail(id)
+      .then((nextSong) => {
+        if (!active) {
+          return;
+        }
+
+        if (nextSong) {
+          registerSongsInCatalog([nextSong]);
+          setDetailSong(nextSong);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setDetailSong(null);
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setSongLoading(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [id, catalogSong, registerSongsInCatalog]);
 
   useEffect(() => {
     let active = true;
     setLoading(true);
     setError('');
 
-    new Promise((resolve, reject) => {
-      setTimeout(() => {
+    Promise.resolve()
+      .then(() => {
         if (!id) {
-          reject(new Error('无效的歌曲编号。'));
-          return;
+          throw new Error('无效的歌曲编号。');
         }
 
-        resolve(ensureSongComments(id));
-      }, 800);
-    })
+        return ensureSongComments(id);
+      })
       .catch((err) => {
         if (active) {
           setError(err?.message || '评论加载失败。');
@@ -57,6 +111,43 @@ const SongDetailPage = () => {
     };
   }, [ensureSongComments, id]);
 
+  useEffect(() => {
+    let active = true;
+    setLyricsLoading(true);
+    setLyricsError('');
+
+    if (!id) {
+      setLyricsLoading(false);
+      return;
+    }
+
+    if (cachedLyrics.length > 0) {
+      setLyricsLoading(false);
+      return;
+    }
+
+    fetchSongLyrics(id)
+      .then((nextLyrics) => {
+        if (active) {
+          cacheLyrics(id, nextLyrics);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setLyricsError('歌词加载失败，请稍后重试。');
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setLyricsLoading(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [cacheLyrics, cachedLyrics.length, id]);
+
   const handleAddComment = async (event) => {
     event.preventDefault();
 
@@ -69,16 +160,12 @@ const SongDetailPage = () => {
     setSubmitting(true);
 
     try {
-      const comment = await new Promise((resolve) => {
-        setTimeout(() => {
-          resolve({
-            id: `comment-${Date.now()}`,
-            username: currentUser?.username || '匿名用户',
-            content: newComment.trim(),
-            createdAt: new Date().toLocaleString()
-          });
-        }, 600);
-      });
+      const comment = {
+        id: `comment-${Date.now()}`,
+        username: currentUser?.username || '匿名用户',
+        content: newComment.trim(),
+        createdAt: new Date().toLocaleString()
+      };
 
       addComment(id, comment);
       setNewComment('');
@@ -94,7 +181,6 @@ const SongDetailPage = () => {
     setSubmitting(true);
 
     try {
-      await new Promise((resolve) => setTimeout(resolve, 500));
       deleteComment(id, commentId);
     } catch (err) {
       setError(err?.message || '删除评论失败。');
@@ -102,6 +188,14 @@ const SongDetailPage = () => {
       setSubmitting(false);
     }
   };
+
+  if (songLoading) {
+    return (
+      <div className="page-shell page-space">
+        <div className="state-card">歌曲详情加载中...</div>
+      </div>
+    );
+  }
 
   if (!song) {
     return (
@@ -114,6 +208,7 @@ const SongDetailPage = () => {
   }
 
   const isFavorite = favoriteSongIds.includes(song.id);
+  const isCurrentSong = currentSongId === song.id;
 
   return (
     <section className="page-shell page-space detail-layout">
@@ -131,13 +226,24 @@ const SongDetailPage = () => {
               {isFavorite ? '已收藏' : '收藏'}
             </button>
           </div>
-          <p className="detail-subtitle">{song.artist} · {song.album} · {song.duration} · {song.year}</p>
+          <p className="detail-subtitle">
+            {song.artist} · {song.album} · {song.duration} · {song.year}
+          </p>
           <p>{song.description}</p>
+          <p className="helper-text">歌词在下方展示。点击“立即播放”后，歌词会随当前播放进度自动高亮。</p>
           <button type="button" className="primary-btn" onClick={() => playSong(song, songs)}>
             立即播放
           </button>
         </div>
       </div>
+
+      <LyricsPanel
+        lyrics={cachedLyrics}
+        currentTime={isCurrentSong ? currentTime : 0}
+        isSyncEnabled={isCurrentSong}
+        loading={lyricsLoading}
+        error={lyricsError}
+      />
 
       <div className="comment-card">
         <div className="comment-card__header">
@@ -160,23 +266,27 @@ const SongDetailPage = () => {
         </form>
 
         <div className="comment-list">
-          {comments.map((comment) => (
-            <article key={comment.id} className="comment-item">
-              <div>
-                <strong>{comment.username}</strong>
-                <p>{comment.content}</p>
-                <span className="muted-text">{comment.createdAt}</span>
-              </div>
-              <button
-                type="button"
-                className="text-btn"
-                onClick={() => handleDeleteComment(comment.id)}
-                disabled={submitting}
-              >
-                删除
-              </button>
-            </article>
-          ))}
+          {comments.length > 0 ? (
+            comments.map((comment) => (
+              <article key={comment.id} className="comment-item">
+                <div>
+                  <strong>{comment.username}</strong>
+                  <p>{comment.content}</p>
+                  <span className="muted-text">{comment.createdAt}</span>
+                </div>
+                <button
+                  type="button"
+                  className="text-btn"
+                  onClick={() => handleDeleteComment(comment.id)}
+                  disabled={submitting}
+                >
+                  删除
+                </button>
+              </article>
+            ))
+          ) : (
+            <div className="empty-card">还没有评论，留下第一条评论吧。</div>
+          )}
         </div>
       </div>
     </section>
